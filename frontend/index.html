@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG 知识库 AI Agent</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app-container">
+    <!-- 左侧边栏：知识库管理 -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h1 class="logo">📚 RAG 知识库</h1>
+            <p class="subtitle">AI Agent · 基于 DeepSeek</p>
+        </div>
+
+        <!-- 文档上传区域 -->
+        <div class="upload-section">
+            <div class="upload-box" id="uploadBox">
+                <input type="file" id="fileInput" accept=".pdf,.txt,.md,.markdown" multiple hidden>
+                <div class="upload-icon">⬆️</div>
+                <p>点击或拖拽上传文档</p>
+                <p class="upload-hint">支持 PDF / TXT / Markdown</p>
+            </div>
+            <div class="upload-progress hidden" id="uploadProgress">
+                <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+                <p class="progress-text" id="progressText">处理中...</p>
+            </div>
+        </div>
+
+        <!-- 知识库统计 -->
+        <div class="stats-section">
+            <div class="stat-item">
+                <span class="stat-value" id="docCount">0</span>
+                <span class="stat-label">文档数</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value" id="chunkCount">0</span>
+                <span class="stat-label">知识片段</span>
+            </div>
+        </div>
+
+        <!-- 文档列表 -->
+        <div class="doc-list-section">
+            <h2 class="section-title">已入库文档</h2>
+            <ul class="doc-list" id="docList">
+                <li class="doc-empty">暂无文档，请先上传</li>
+            </ul>
+        </div>
+    </aside>
+
+    <!-- 主区域：问答对话 -->
+    <main class="chat-area">
+        <header class="chat-header">
+            <h2>知识库问答</h2>
+            <p>Agent 先检索文档片段，再基于原文回答 · 无相关资料时直接拒答</p>
+        </header>
+
+        <!-- 消息列表 -->
+        <div class="message-list" id="messageList">
+            <div class="welcome-card">
+                <h3>👋 欢迎使用 RAG 知识库 AI Agent</h3>
+                <ul>
+                    <li>1. 在左侧上传 PDF / TXT / Markdown 文档，系统自动切片并向量化入库</li>
+                    <li>2. 在下方输入问题，Agent 会先检索相关文档片段</li>
+                    <li>3. 回答严格基于检索到的原文，并标注引用来源</li>
+                    <li>4. 知识库中没有相关信息时，将回复「文档内无相关资料」</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- 输入区域 -->
+        <div class="input-area">
+            <textarea id="questionInput" rows="1" placeholder="输入你的问题，Enter 发送，Shift+Enter 换行..."></textarea>
+            <button id="sendBtn" class="send-btn">发送</button>
+        </div>
+    </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

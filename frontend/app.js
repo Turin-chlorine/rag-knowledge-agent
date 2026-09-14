@@ -1,0 +1,371 @@
+/**
+ * RAG 知识库 AI Agent 前端交互逻辑
+ * 功能：文档上传、知识库列表管理、问答对话
+ */
+
+// ---------------- DOM 元素引用 ----------------
+const uploadBox = document.getElementById('uploadBox');
+const fileInput = document.getElementById('fileInput');
+const uploadProgress = document.getElementById('uploadProgress');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const docCountEl = document.getElementById('docCount');
+const chunkCountEl = document.getElementById('chunkCount');
+const docListEl = document.getElementById('docList');
+const messageList = document.getElementById('messageList');
+const questionInput = document.getElementById('questionInput');
+const sendBtn = document.getElementById('sendBtn');
+
+// 无相关资料的固定文案（与后端保持一致）
+const NO_INFO_REPLY = '文档内无相关资料';
+
+// ---------------- 初始化 ----------------
+document.addEventListener('DOMContentLoaded', () => {
+    loadDocuments();
+    bindEvents();
+    checkModelReady();
+});
+
+/**
+ * 轮询后端模型就绪状态。
+ * 首次启动时后端需联网下载 Embedding 模型，期间禁用上传并给出提示。
+ */
+async function checkModelReady() {
+    try {
+        const resp = await fetch('/api/health');
+        const data = await resp.json();
+        if (data.model_ready) {
+            uploadBox.style.pointerEvents = '';
+            uploadBox.style.opacity = '';
+            return; // 模型已就绪，停止轮询
+        }
+    } catch (err) {
+        console.error('健康检查失败', err);
+    }
+
+    // 未就绪：禁用上传区域并提示，3 秒后重试
+    uploadBox.style.pointerEvents = 'none';
+    uploadBox.style.opacity = '0.6';
+    uploadProgress.classList.remove('hidden');
+    progressFill.style.width = '60%';
+    progressText.textContent = '⏳ Embedding 模型加载中（首次启动需联网下载，请查看后端控制台进度）...';
+    setTimeout(checkModelReady, 3000);
+}
+
+/**
+ * 绑定上传、发送等交互事件
+ */
+function bindEvents() {
+    // 点击上传区域触发文件选择
+    uploadBox.addEventListener('click', () => fileInput.click());
+
+    // 文件选择后逐个上传
+    fileInput.addEventListener('change', () => {
+        handleFiles(fileInput.files);
+        fileInput.value = '';
+    });
+
+    // 拖拽上传支持
+    uploadBox.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        uploadBox.classList.add('dragover');
+    });
+    uploadBox.addEventListener('dragleave', () => uploadBox.classList.remove('dragover'));
+    uploadBox.addEventListener('drop', (e) => {
+        e.preventDefault();
+        uploadBox.classList.remove('dragover');
+        handleFiles(e.dataTransfer.files);
+    });
+
+    // 发送按钮与回车快捷键
+    sendBtn.addEventListener('click', sendQuestion);
+    questionInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendQuestion();
+        }
+    });
+
+    // 输入框自动增高
+    questionInput.addEventListener('input', () => {
+        questionInput.style.height = 'auto';
+        questionInput.style.height = Math.min(questionInput.scrollHeight, 140) + 'px';
+    });
+}
+
+// ---------------- 文档上传 ----------------
+
+/**
+ * 顺序上传选中的文件列表
+ * @param {FileList} files 待上传文件
+ */
+async function handleFiles(files) {
+    const allowed = ['.pdf', '.txt', '.md', '.markdown'];
+    for (const file of files) {
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        if (!allowed.includes(ext)) {
+            alert(`不支持的文件类型：${file.name}（仅支持 PDF/TXT/Markdown）`);
+            continue;
+        }
+        await uploadFile(file);
+    }
+}
+
+/**
+ * 上传单个文件并展示处理进度
+ * @param {File} file 待上传文件
+ */
+async function uploadFile(file) {
+    uploadProgress.classList.remove('hidden');
+    progressFill.style.width = '30%';
+    progressText.textContent = `正在解析并向量化：${file.name}`;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        // 设置 120 秒超时，避免网络异常时请求无限挂起导致页面卡住
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 120000);
+
+        const resp = await fetch('/api/documents/upload', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal,
+        });
+        clearTimeout(timer);
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            throw new Error(data.detail || '上传失败');
+        }
+
+        progressFill.style.width = '100%';
+        progressText.textContent = `✅ ${file.name} 入库成功（${data.chunk_count} 个片段）`;
+        await loadDocuments();
+    } catch (err) {
+        progressFill.style.width = '100%';
+        progressFill.style.background = '#ef4444';
+        // 超时中断时给出更友好的提示文案
+        const msg = err.name === 'AbortError'
+            ? '处理超时，请检查后端控制台日志后重试'
+            : (err.message || '上传失败');
+        progressText.textContent = `❌ ${msg}`;
+        // 失败信息保留 6 秒便于阅读
+        setTimeout(() => {
+            uploadProgress.classList.add('hidden');
+            progressFill.style.width = '0';
+            progressFill.style.background = '';
+        }, 6000);
+        return;
+    }
+
+    // 2.5 秒后隐藏进度条并恢复样式
+    setTimeout(() => {
+        uploadProgress.classList.add('hidden');
+        progressFill.style.width = '0';
+        progressFill.style.background = '';
+    }, 2500);
+}
+
+// ---------------- 知识库管理 ----------------
+
+/**
+ * 拉取知识库统计与文档列表并渲染
+ */
+async function loadDocuments() {
+    try {
+        const resp = await fetch('/api/documents');
+        const data = await resp.json();
+
+        docCountEl.textContent = data.document_count;
+        chunkCountEl.textContent = data.chunk_count;
+        renderDocList(data.documents);
+    } catch (err) {
+        console.error('加载文档列表失败', err);
+    }
+}
+
+/**
+ * 渲染文档列表
+ * @param {Array} documents 文档元信息数组
+ */
+function renderDocList(documents) {
+    if (!documents || documents.length === 0) {
+        docListEl.innerHTML = '<li class="doc-empty">暂无文档，请先上传</li>';
+        return;
+    }
+
+    docListEl.innerHTML = documents.map((doc) => `
+        <li class="doc-item">
+            <div class="doc-info">
+                <div class="doc-name" title="${escapeHtml(doc.doc_name)}">${escapeHtml(doc.doc_name)}</div>
+                <div class="doc-meta">${doc.chunk_count} 片段 · ${doc.upload_time}</div>
+            </div>
+            <button class="doc-delete" title="删除文档" onclick="deleteDocument('${doc.doc_id}')">🗑</button>
+        </li>
+    `).join('');
+}
+
+/**
+ * 删除指定文档并刷新列表
+ * @param {string} docId 文档 ID
+ */
+async function deleteDocument(docId) {
+    if (!confirm('确定删除该文档及其全部知识片段？')) return;
+    try {
+        const resp = await fetch(`/api/documents/${docId}`, { method: 'DELETE' });
+        if (!resp.ok) {
+            const data = await resp.json();
+            throw new Error(data.detail || '删除失败');
+        }
+        await loadDocuments();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+// ---------------- 问答对话 ----------------
+
+/**
+ * 发送用户问题并展示 Agent 回答
+ */
+async function sendQuestion() {
+    const question = questionInput.value.trim();
+    if (!question || sendBtn.disabled) return;
+
+    // 展示用户消息并清空输入框
+    appendMessage('user', question);
+    questionInput.value = '';
+    questionInput.style.height = 'auto';
+    sendBtn.disabled = true;
+
+    // 展示"检索中"占位消息
+    const thinkingEl = appendThinking();
+
+    try {
+        const resp = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question }),
+        });
+        const data = await resp.json();
+
+        thinkingEl.remove();
+
+        if (!resp.ok) {
+            appendMessage('assistant', `⚠️ ${data.detail || '请求失败'}`);
+            return;
+        }
+
+        // 渲染回答与引用来源
+        appendAssistantMessage(data);
+    } catch (err) {
+        thinkingEl.remove();
+        appendMessage('assistant', `⚠️ 网络错误：${err.message}`);
+    } finally {
+        sendBtn.disabled = false;
+        questionInput.focus();
+    }
+}
+
+/**
+ * 渲染助手回答（含引用来源折叠面板）
+ * @param {Object} data 后端返回 {answer, sources, retrieval_count}
+ */
+function appendAssistantMessage(data) {
+    const isNoInfo = data.answer === NO_INFO_REPLY;
+
+    const messageEl = document.createElement('div');
+    messageEl.className = 'message assistant';
+
+    // 组装引用来源 HTML
+    let sourcesHtml = '';
+    if (data.sources && data.sources.length > 0) {
+        const items = data.sources.map((s) => `
+            <div class="source-item">
+                <div class="source-head">
+                    <span>[${s.index}] ${escapeHtml(s.doc_name)} · 第 ${s.chunk_index + 1} 段</span>
+                    <span class="source-score">相似度 ${s.score}</span>
+                </div>
+                <div class="source-content">${escapeHtml(s.content)}</div>
+            </div>
+        `).join('');
+        sourcesHtml = `
+            <details class="sources">
+                <summary>📎 引用来源（${data.sources.length} 个片段）</summary>
+                ${items}
+            </details>
+        `;
+    }
+
+    messageEl.innerHTML = `
+        <div class="avatar">🤖</div>
+        <div class="bubble ${isNoInfo ? 'no-info' : ''}">
+            <div class="answer-text">${escapeHtml(data.answer)}</div>
+            ${sourcesHtml}
+        </div>
+    `;
+    messageList.appendChild(messageEl);
+    scrollToBottom();
+}
+
+/**
+ * 追加一条普通消息气泡
+ * @param {string} role user 或 assistant
+ * @param {string} text 消息文本
+ */
+function appendMessage(role, text) {
+    const avatar = role === 'user' ? '🧑' : '🤖';
+    const el = document.createElement('div');
+    el.className = `message ${role}`;
+    el.innerHTML = `
+        <div class="avatar">${avatar}</div>
+        <div class="bubble"><div class="answer-text">${escapeHtml(text)}</div></div>
+    `;
+    messageList.appendChild(el);
+    scrollToBottom();
+    return el;
+}
+
+/**
+ * 追加"检索思考中"占位消息
+ * @returns {HTMLElement} 占位元素（用于后续移除）
+ */
+function appendThinking() {
+    const el = document.createElement('div');
+    el.className = 'message assistant';
+    el.innerHTML = `
+        <div class="avatar">🤖</div>
+        <div class="bubble">
+            <div class="thinking"><span></span><span></span><span></span>&nbsp;正在检索知识库...</div>
+        </div>
+    `;
+    messageList.appendChild(el);
+    scrollToBottom();
+    return el;
+}
+
+// ---------------- 工具函数 ----------------
+
+/**
+ * 消息列表滚动到底部
+ */
+function scrollToBottom() {
+    messageList.scrollTop = messageList.scrollHeight;
+}
+
+/**
+ * HTML 转义，防止文档内容注入
+ * @param {string} str 原始字符串
+ * @returns {string} 转义后的字符串
+ */
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
