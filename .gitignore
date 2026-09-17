@@ -9,3 +9,6 @@ venv/
 .vscode/
 # Trae 本地工作区配置与自定义 skill（仅本机使用，不入库）
 .trae/
+# RAG 评测脚本与评测结果（仅本机评测使用，不入库）
+eval_rag.py
+eval_result.json

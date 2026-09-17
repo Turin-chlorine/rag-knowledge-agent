@@ -28,6 +28,7 @@ rag-knowledge-agent/
 │   ├── index.html          # 页面结构
 │   ├── style.css           # 样式
 │   └── app.js              # 交互逻辑
+├── test_docs/              # 评测用测试文档（Dify / Coze / 幻觉 三篇）
 ├── data/                   # 向量库持久化数据（运行后自动生成）
 ├── uploads/                # 上传的原始文档（运行后自动生成）
 ├── requirements.txt        # Python 依赖
@@ -137,3 +138,11 @@ http://127.0.0.1:8000
 - **回答提示未配置 API Key**：确认 `.env` 文件在项目根目录且 `DEEPSEEK_API_KEY` 已填写**真实** Key（`sk-` 开头的纯英文数字，勿保留示例中的中文占位符），修改后需重启服务。
 - **检索不到相关内容**：可适当调低 `.env` 中的 `RELEVANCE_THRESHOLD`（如 0.15）。
 - **修改代码后不生效**：确认已重启 `uvicorn` 服务，并强制刷新浏览器页面（Ctrl+F5）以加载最新前端。
+
+## 📊 评测数据
+
+项目使用 `test_docs/` 下的三篇文档（Dify 工作流、Coze 知识库、LLM 幻觉）构建了 40 道测试题（单跳事实 / 多文档对比 / 库内无答案 / 越界提问），并对召回率、检索精确率、幻觉率、任务完成率进行了完整评测。
+
+评测明细与指标汇总见飞书多维表格：**[RAG知识库Agent评测集（40题）](https://hcna5lsumjxf.feishu.cn/base/WptQb7Qb4a8wP7scKrlcrqkznBf)**
+
+> 表格包含每题的 Agent 最终回答、检索到的原文出处（文档 + 片段全文 + 相似度）、原文真值及四项判定标签，可直接用于复盘检索质量与防幻觉效果。
