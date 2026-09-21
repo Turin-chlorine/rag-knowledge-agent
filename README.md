@@ -3,6 +3,12 @@
 一个基于 **DeepSeek 大模型 + 本地轻量向量库** 的网页版 RAG（检索增强生成）知识库问答系统。
 上传文档后自动切片、向量化入库；提问时 Agent 先调用内置检索 Skill 获取相关文档片段，再交由 DeepSeek 严格基于原文生成带引用来源的回答。
 
+## 📋 产品需求文档（PRD）
+
+完整产品需求文档已整理至飞书云文档，涵盖产品背景、用户故事、功能需求、非功能需求、技术架构、评测体系与迭代规划，并附系统主界面原型图：
+
+👉 [RAG 知识库 AI Agent PRD（飞书文档）](https://hcna5lsumjxf.feishu.cn/docx/RXWgdOy5xofh8NxDBUqcGo2XnrB)
+
 ## ✨ 功能特性
 
 - 📄 **多格式文档支持**：PDF / TXT / Markdown 上传，自动解析入库；扫描件 PDF 可选启用 OCR 降级识别
