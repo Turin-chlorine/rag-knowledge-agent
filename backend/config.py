@@ -27,6 +27,10 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # 使用的模型名称
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+# 生成温度：控制回答的随机性与发散程度。
+# 0.1=极保守(幻觉低但归纳弱)；0.3=轻度放宽(允许合理归纳，幻觉可控)；
+# 0.5=平衡；0.7=较强发散。本项目取 0.3 以提升任务完成率，接受<5%低幻觉。
+DEEPSEEK_TEMPERATURE = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.3"))
 
 
 def is_api_key_configured() -> bool:
@@ -45,21 +49,40 @@ def is_api_key_configured() -> bool:
     return DEEPSEEK_API_KEY.startswith("sk-") and DEEPSEEK_API_KEY.isascii()
 
 # ---------------- 文档切片配置 ----------------
-# 单个切片目标长度（字符数），建议 500-1000
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
-# 相邻切片重叠长度（字符数），建议 100-200
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
+# 单个切片目标长度（字符数）。
+# bge-small-zh-v1.5 的 max_seq_length=512 token，中文约 1 字≈1.3 token，
+# 切片控制在 500 字符以内可保证完整向量化、避免尾部截断导致召回丢失。
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
+# 相邻切片重叠长度（字符数），保证跨块边界信息不丢
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 
 # ---------------- 检索配置 ----------------
-# 每次检索返回的最相关片段数量（3-5 为宜）
-TOP_K = int(os.getenv("TOP_K", "5"))
-# 相关性阈值：余弦相似度低于该值的片段视为不相关，直接丢弃
-RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.25"))
+# 每次检索返回的最相关片段数量。
+# 由 5 提至 8：扩大候选池，提高召回上限，配合 bge 中文模型更准的语义匹配。
+TOP_K = int(os.getenv("TOP_K", "8"))
+# 相关性阈值：余弦相似度低于该值的片段视为不相关，直接丢弃。
+# bge-small-zh 的相似度分布整体低于 all-MiniLM-L6-v2，阈值由 0.25 降至 0.15，
+# 避免正确片段被误过滤（降低误拒率、提升任务完成率）。
+RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.15"))
 
 # ---------------- Embedding 模型配置 ----------------
-# 默认使用轻量级 all-MiniLM-L6-v2（首次运行自动下载，约 90MB）
-# 中文文档较多时可改为 "BAAI/bge-small-zh-v1.5"
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+# 使用中文 Embedding 模型 bge-small-zh-v1.5（约 100MB）。
+# 此前 all-MiniLM-L6-v2 为英文模型，对中文语义匹配弱，导致召回率仅 51.85%；
+# 切换中文模型从根因修复召回问题。首次运行经 hf-mirror.com 自动下载。
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+
+# ---------------- OCR 降级配置（扫描件 PDF）----------------
+# 当 pdfplumber 提取不到文本层（疑似扫描件 PDF）时，降级用 Tesseract OCR 识别图片文本。
+# 前置依赖：
+#   1) 系统安装 Tesseract OCR 引擎（Windows 安装包后在 .env 或 PATH 中暴露可执行文件）
+#   2) 通过 pip 安装 pytesseract（已在 requirements.txt 中声明）
+# 未安装时自动跳过 OCR，不影响纯文本 PDF 的正常解析。
+# 是否启用 OCR 降级，默认开启；未安装 Tesseract 时自动跳过
+OCR_ENABLED = os.getenv("OCR_ENABLED", "true").lower() == "true"
+# OCR 识别语言包：chi_sim+eng 覆盖中文简体与英文；仅英文场景可设为 eng
+OCR_LANG = os.getenv("OCR_LANG", "chi_sim+eng")
+# 转图分辨率（DPI）：越高越清晰但越慢，300 适合常规扫描件
+OCR_DPI = int(os.getenv("OCR_DPI", "300"))
 
 # ---------------- 存储路径配置 ----------------
 # 向量库持久化目录

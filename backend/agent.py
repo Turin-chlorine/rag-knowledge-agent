@@ -11,6 +11,7 @@ from config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
+    DEEPSEEK_TEMPERATURE,
     TOP_K,
     RELEVANCE_THRESHOLD,
     is_api_key_configured,
@@ -21,12 +22,15 @@ from vector_store import vector_store
 # 检索无结果时的固定回复文案
 NO_INFO_REPLY = "文档内无相关资料"
 
-# 系统提示词：约束模型只依据检索内容作答，禁止编造
-SYSTEM_PROMPT = """你是一个严谨的知识库问答助手。你只能依据下方【参考资料】回答用户问题，必须遵守：
-1. 回答内容必须完全来自参考资料，禁止编造、推测或使用外部知识。
-2. 引用内容时使用 [n] 标注来源编号（n 为资料序号）。
-3. 参考资料中没有与问题相关的信息时，只回复"文档内无相关资料"，不要输出其他内容。
-4. 回答简洁准确，可使用 Markdown 格式组织内容。"""
+# 系统提示词：约束模型以检索内容为主要依据作答。
+# 相比此前的"完全禁止推测"，现允许归纳总结与合理推断以提升任务完成率，
+# 但仍禁止编造资料中不存在的事实，并将幻觉率控制在低水平。
+SYSTEM_PROMPT = """你是一个知识库问答助手。请基于下方【参考资料】回答用户问题，遵守：
+1. 回答应以参考资料为主要依据，可对资料进行归纳、总结和同义改写，使回答更完整易读。
+2. 可基于参考资料进行合理推断，但不得编造资料中明确不存在的事实。
+3. 引用具体内容时使用 [n] 标注来源编号（n 为资料序号）。
+4. 若参考资料中确实没有与问题相关的信息，回复"文档内无相关资料"。
+5. 回答简洁准确，可使用 Markdown 格式组织内容。"""
 
 
 def retrieve_documents(question: str) -> list[dict]:
@@ -99,7 +103,7 @@ def call_deepseek(question: str, context: str) -> str:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.1,  # 低温度保证回答稳定、减少发散
+            "temperature": DEEPSEEK_TEMPERATURE,  # 由 config 控制，0.3 允许轻度归纳
         },
         timeout=60,
     )

@@ -1,7 +1,7 @@
 """
 向量化模块
 使用 sentence-transformers 将文本片段转换为稠密向量。
-默认模型 all-MiniLM-L6-v2 轻量高效，首次运行自动下载。
+默认模型 BAAI/bge-small-zh-v1.5 中文 Embedding，首次运行自动下载。
 """
 import threading
 
