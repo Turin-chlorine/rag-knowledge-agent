@@ -1,6 +1,6 @@
 /**
  * RAG 知识库 AI Agent 前端交互逻辑
- * 功能：文档上传、知识库列表管理、问答对话
+ * 功能：文档上传、知识库列表管理、多轮问答（会话记忆）、检索调试视图
  */
 
 // ---------------- DOM 元素引用 ----------------
@@ -15,9 +15,13 @@ const docListEl = document.getElementById('docList');
 const messageList = document.getElementById('messageList');
 const questionInput = document.getElementById('questionInput');
 const sendBtn = document.getElementById('sendBtn');
+const newChatBtn = document.getElementById('newChatBtn');
 
 // 无相关资料的固定文案（与后端保持一致）
 const NO_INFO_REPLY = '文档内无相关资料';
+
+// 当前会话 ID：首轮为空，由后端创建后回填；"新对话"时重新置空
+let sessionId = null;
 
 // ---------------- 初始化 ----------------
 document.addEventListener('DOMContentLoaded', () => {
@@ -53,7 +57,7 @@ async function checkModelReady() {
 }
 
 /**
- * 绑定上传、发送等交互事件
+ * 绑定上传、发送、新对话等交互事件
  */
 function bindEvents() {
     // 点击上传区域触发文件选择
@@ -85,6 +89,9 @@ function bindEvents() {
             sendQuestion();
         }
     });
+
+    // 新对话按钮：清空服务端历史并重置本地视图
+    newChatBtn.addEventListener('click', startNewChat);
 
     // 输入框自动增高
     questionInput.addEventListener('input', () => {
@@ -225,10 +232,48 @@ async function deleteDocument(docId) {
     }
 }
 
+// ---------------- 会话管理（多轮对话） ----------------
+
+/**
+ * 开始新对话：通知后端清空历史（尽力而为）、重置本地会话 ID 与消息列表。
+ */
+async function startNewChat() {
+    const oldSessionId = sessionId;
+    sessionId = null;
+    // 通知后端清空旧会话历史；失败不阻塞，本地置空已能切断上下文
+    if (oldSessionId) {
+        try {
+            await fetch('/api/session/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: oldSessionId }),
+            });
+        } catch (err) {
+            console.warn('清空服务端会话失败（已忽略）', err);
+        }
+    }
+    renderWelcome();
+    questionInput.focus();
+}
+
+/**
+ * 用欢迎卡片重置消息区（新对话时调用）。
+ */
+function renderWelcome() {
+    messageList.innerHTML = `
+        <div class="welcome-card">
+            <h3>👋 已开启新对话</h3>
+            <ul>
+                <li>上下文已清空，接下来的提问不会携带之前的对话内容</li>
+            </ul>
+        </div>
+    `;
+}
+
 // ---------------- 问答对话 ----------------
 
 /**
- * 发送用户问题并展示 Agent 回答
+ * 发送用户问题并展示 Agent 回答（携带会话 ID 以支持多轮上下文）。
  */
 async function sendQuestion() {
     const question = questionInput.value.trim();
@@ -247,7 +292,8 @@ async function sendQuestion() {
         const resp = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question }),
+            // session_id 首轮为 null，后端创建后在响应中返回并回填
+            body: JSON.stringify({ question, session_id: sessionId }),
         });
         const data = await resp.json();
 
@@ -258,7 +304,10 @@ async function sendQuestion() {
             return;
         }
 
-        // 渲染回答与引用来源
+        // 回填会话 ID，后续提问携带同一 ID 形成多轮对话
+        sessionId = data.session_id;
+
+        // 渲染回答、引用来源与检索调试视图
         appendAssistantMessage(data);
     } catch (err) {
         thinkingEl.remove();
@@ -270,8 +319,8 @@ async function sendQuestion() {
 }
 
 /**
- * 渲染助手回答（含引用来源折叠面板）
- * @param {Object} data 后端返回 {answer, sources, retrieval_count}
+ * 渲染助手回答（含引用来源折叠面板与检索调试视图）
+ * @param {Object} data 后端返回 {answer, sources, retrieval_count, debug}
  */
 function appendAssistantMessage(data) {
     const isNoInfo = data.answer === NO_INFO_REPLY;
@@ -279,35 +328,134 @@ function appendAssistantMessage(data) {
     const messageEl = document.createElement('div');
     messageEl.className = 'message assistant';
 
-    // 组装引用来源 HTML
-    let sourcesHtml = '';
-    if (data.sources && data.sources.length > 0) {
-        const items = data.sources.map((s) => `
-            <div class="source-item">
-                <div class="source-head">
-                    <span>[${s.index}] ${escapeHtml(s.doc_name)} · 第 ${s.chunk_index + 1} 段</span>
-                    <span class="source-score">相似度 ${s.score}</span>
-                </div>
-                <div class="source-content">${escapeHtml(s.content)}</div>
-            </div>
-        `).join('');
-        sourcesHtml = `
-            <details class="sources">
-                <summary>📎 引用来源（${data.sources.length} 个片段）</summary>
-                ${items}
-            </details>
-        `;
-    }
-
     messageEl.innerHTML = `
         <div class="avatar">🤖</div>
         <div class="bubble ${isNoInfo ? 'no-info' : ''}">
             <div class="answer-text">${escapeHtml(data.answer)}</div>
-            ${sourcesHtml}
+            ${renderSources(data.sources)}
+            ${renderDebugPanel(data.debug)}
         </div>
     `;
     messageList.appendChild(messageEl);
     scrollToBottom();
+}
+
+/**
+ * 组装引用来源折叠面板 HTML，展示粗排余弦分与重排 logit。
+ * @param {Array} sources 入选片段列表
+ * @returns {string} 面板 HTML；无来源时返回空字符串
+ */
+function renderSources(sources) {
+    if (!sources || sources.length === 0) return '';
+
+    const items = sources.map((s) => `
+        <div class="source-item">
+            <div class="source-head">
+                <span>[${s.index}] ${escapeHtml(s.doc_name)} · 第 ${s.chunk_index + 1} 段</span>
+                <span class="source-scores">
+                    余弦 ${s.retrieval_score}${s.rerank_score != null ? ` · 重排 ${s.rerank_score}` : ''}
+                </span>
+            </div>
+            <div class="source-content">${escapeHtml(s.content)}</div>
+        </div>
+    `).join('');
+
+    return `
+        <details class="sources">
+            <summary>📎 引用来源（${sources.length} 个片段）</summary>
+            ${items}
+        </details>
+    `;
+}
+
+/**
+ * 组装检索调试面板 HTML：检索管线信息 + 全部候选片段的双分数条与名次变化。
+ * 用于调参时直观判断粗排/重排是否按预期工作。
+ * @param {Object} debug 后端返回的检索调试信息
+ * @returns {string} 面板 HTML；无调试信息时返回空字符串
+ */
+function renderDebugPanel(debug) {
+    if (!debug) return '';
+
+    // 重排状态文案：已生效 / 已降级 / 未启用
+    const rerankStatus = !debug.rerank_enabled
+        ? '未启用'
+        : (debug.rerank_applied ? '已生效' : '⚠️ 已降级');
+
+    // 多轮改写时展示实际用于检索的问题
+    const rewriteLine = debug.rewritten
+        ? `<div class="debug-meta-line">🔁 改写后检索问题：${escapeHtml(debug.retrieval_query)}</div>`
+        : '';
+
+    // 计算重排分归一化基准（仅取正分最大值），用于条形图宽度
+    const rerankScores = debug.candidates
+        .map((c) => c.rerank_score)
+        .filter((v) => v != null && v > 0);
+    const maxRerank = rerankScores.length ? Math.max(...rerankScores) : 1;
+
+    // 逐条候选渲染
+    const rows = debug.candidates.map((c) => {
+        // 名次变化：▲上升 / ＝不变 / ▼下降 / 淘汰
+        let moveHtml = '<span class="move-out">淘汰</span>';
+        if (c.final_rank != null) {
+            if (c.final_rank === c.coarse_rank) {
+                moveHtml = '<span class="move-same">＝</span>';
+            } else if (c.final_rank < c.coarse_rank) {
+                moveHtml = `<span class="move-up">▲${c.coarse_rank - c.final_rank}</span>`;
+            } else {
+                moveHtml = `<span class="move-down">▼${c.final_rank - c.coarse_rank}</span>`;
+            }
+        }
+
+        // 余弦条：分数大致在 0-1，直接换算百分比并钳制
+        const cosinePct = Math.min(Math.max(c.retrieval_score * 100, 0), 100);
+        // 重排条：logit 可正可负，按正分最大值归一化；负值不填充
+        const rerankPct = c.rerank_score != null && c.rerank_score > 0
+            ? (c.rerank_score / maxRerank) * 100
+            : 0;
+        const rerankVal = c.rerank_score != null ? c.rerank_score : '—';
+
+        return `
+            <div class="debug-row ${c.selected ? 'selected' : 'dropped'}">
+                <div class="debug-rank">
+                    <span class="rank-badge ${c.selected ? 'rank-in' : 'rank-none'}">
+                        ${c.final_rank != null ? `#${c.final_rank}` : '—'}
+                    </span>
+                    ${moveHtml}
+                    <span class="rank-coarse">粗排#${c.coarse_rank}</span>
+                </div>
+                <div class="debug-main">
+                    <div class="debug-doc">${escapeHtml(c.doc_name)} · 第 ${c.chunk_index + 1} 段</div>
+                    <div class="bar-line">
+                        <span class="bar-label">余弦</span>
+                        <div class="bar-track"><div class="bar-fill bar-cosine" style="width:${cosinePct.toFixed(1)}%"></div></div>
+                        <span class="bar-val">${c.retrieval_score}</span>
+                    </div>
+                    <div class="bar-line">
+                        <span class="bar-label">重排</span>
+                        <div class="bar-track"><div class="bar-fill bar-rerank" style="width:${rerankPct.toFixed(1)}%"></div></div>
+                        <span class="bar-val">${rerankVal}</span>
+                    </div>
+                    <details class="debug-snippet">
+                        <summary>查看片段原文</summary>
+                        <div class="debug-snippet-content">${escapeHtml(c.content)}</div>
+                    </details>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <details class="debug-panel">
+            <summary>🔍 检索调试（粗排 ${debug.coarse_count} → 重排${rerankStatus} → 入选 ${debug.final_count}）</summary>
+            <div class="debug-meta">
+                <div class="debug-meta-line">候选池上限：${debug.candidate_k} · 粗排阈值后剩余 ${debug.coarse_count} 个</div>
+                <div class="debug-meta-line">重排模型：${debug.rerank_model ? escapeHtml(debug.rerank_model) : '—'} · 状态：${rerankStatus}</div>
+                ${rewriteLine}
+            </div>
+            <div class="debug-list">${rows}</div>
+        </details>
+    `;
 }
 
 /**
@@ -338,7 +486,7 @@ function appendThinking() {
     el.innerHTML = `
         <div class="avatar">🤖</div>
         <div class="bubble">
-            <div class="thinking"><span></span><span></span><span></span>&nbsp;正在检索知识库...</div>
+            <div class="thinking"><span></span><span></span><span></span>&nbsp;正在检索与重排知识库片段...</div>
         </div>
     `;
     messageList.appendChild(el);

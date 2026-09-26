@@ -25,16 +25,26 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent import agent_answer
-from config import ALLOWED_EXTENSIONS, CHUNK_OVERLAP, CHUNK_SIZE, UPLOAD_DIR
+from config import (
+    ALLOWED_EXTENSIONS,
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    RERANK_ENABLED,
+    UPLOAD_DIR,
+)
 from document_parser import parse_document
 from embedding import embed_texts, get_model
+from memory import session_manager
+from reranker import get_reranker
 from text_splitter import split_text_into_chunks
 from vector_store import DocumentChunk, DocumentMeta, new_id, vector_store
 
 app = FastAPI(title="RAG 知识库 AI Agent", version="1.0.0")
 
-# Embedding 模型就绪状态标记（首次运行需联网下载模型，下载期间为 False）
-_model_ready = False
+# Embedding 模型就绪事件（首次运行需联网下载模型，加载完成时 set）
+_embedding_ready_event = threading.Event()
+# Rerank 重排模型就绪事件（懒加载兜底，预加载仅为缩短首次问答耗时）
+_rerank_ready_event = threading.Event()
 
 
 def _preload_embedding_model() -> None:
@@ -43,16 +53,33 @@ def _preload_embedding_model() -> None:
     首次运行会触发模型下载（走 HF_ENDPOINT 镜像），进度打印在后端控制台，
     避免把下载耗时推迟到用户上传文档时导致页面卡住。
     """
-    global _model_ready
     try:
         get_model()
-        _model_ready = True
+        _embedding_ready_event.set()
     except Exception as exc:  # 下载/加载失败时打印错误，服务仍可启动
         print(f"[Embedding] 模型加载失败: {exc}")
 
 
+def _preload_reranker() -> None:
+    """
+    后台线程预加载 Cross-Encoder 重排模型。
+    等待 Embedding 模型加载完成后再开始（串行预加载，避免并发下载抢占带宽）；
+    加载失败不影响服务，问答时会自动降级为粗排顺序。
+    """
+    try:
+        # 阻塞等待 Embedding 模型就绪，降低首次启动的并发下载压力
+        _embedding_ready_event.wait()
+        get_reranker()
+        _rerank_ready_event.set()
+    except Exception as exc:
+        print(f"[Rerank] 模型预加载失败（问答时将重试或降级）: {exc}")
+
+
 # 服务启动时在后台线程预加载模型（不阻塞服务启动）
 threading.Thread(target=_preload_embedding_model, daemon=True).start()
+# Rerank 默认开启时才启动预加载线程
+if RERANK_ENABLED:
+    threading.Thread(target=_preload_reranker, daemon=True).start()
 
 # 允许前端跨域访问（本地开发兜底）
 app.add_middleware(
@@ -65,7 +92,13 @@ app.add_middleware(
 
 class QuestionRequest(BaseModel):
     """问答接口请求体"""
-    question: str  # 用户提问内容
+    question: str                # 用户提问内容
+    session_id: str | None = None  # 会话 ID，首轮不传则由后端新建并在响应中返回
+
+
+class SessionResetRequest(BaseModel):
+    """清空会话请求体"""
+    session_id: str
 
 
 # ---------------- 系统状态接口 ----------------
@@ -73,12 +106,13 @@ class QuestionRequest(BaseModel):
 @app.get("/api/health")
 async def health():
     """
-    返回服务与 Embedding 模型就绪状态。
+    返回服务与模型就绪状态。
     前端轮询该接口，在首次启动下载模型期间给出友好提示。
     """
     return {
         "status": "ok",
-        "model_ready": _model_ready,
+        "model_ready": _embedding_ready_event.is_set(),
+        "rerank_ready": _rerank_ready_event.is_set(),
     }
 
 
@@ -93,7 +127,7 @@ async def upload_document(file: UploadFile):
     :return: 入库结果摘要
     """
     # 模型未就绪（首次启动仍在下载）时直接返回明确提示，避免请求长时间挂起
-    if not _model_ready:
+    if not _embedding_ready_event.is_set():
         raise HTTPException(
             status_code=503,
             detail="Embedding 模型尚未加载完成（首次启动需联网下载，请查看后端控制台进度），请稍后重试",
@@ -176,21 +210,36 @@ async def delete_document(doc_id: str):
     return {"doc_id": doc_id, "removed_chunks": removed}
 
 
-# ---------------- 问答接口 ----------------
+# ---------------- 会话与问答接口 ----------------
+
+@app.post("/api/session/reset")
+async def reset_session(request: SessionResetRequest):
+    """
+    清空指定会话的历史消息（前端点击"新对话"时调用）。
+
+    :param request: 请求体中包含 session_id
+    :return: 清空结果
+    """
+    if not request.session_id:
+        raise HTTPException(status_code=400, detail="缺少 session_id")
+    cleared = session_manager.clear_session(request.session_id)
+    return {"session_id": request.session_id, "cleared": cleared}
+
 
 @app.post("/api/chat")
 async def chat(request: QuestionRequest):
     """
-    知识库问答：Agent 先检索文档片段，再调用 DeepSeek 生成回答。
+    知识库问答：Agent 结合会话历史，先检索（粗排+重排）文档片段，
+    再调用 DeepSeek 生成回答。
 
-    :param request: 包含用户问题的请求体
-    :return: 回答、引用来源、检索片段数
+    :param request: 包含用户问题与会话 ID 的请求体
+    :return: 回答、引用来源、检索片段数、会话 ID、检索调试信息
     """
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
-        return agent_answer(question)
+        return agent_answer(question, session_id=request.session_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

@@ -1,8 +1,15 @@
 __pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 *.pyc
 .env
 data/
 uploads/
+.npm-cache/
+node_modules/
 .venv/
 venv/
 .idea/
@@ -12,3 +19,13 @@ venv/
 # RAG 评测脚本与评测结果（仅本机评测使用，不入库）
 eval_rag.py
 eval_result.json
+eval_result_*.json
+eval_result_*.jsonl
+*.log
+dist/
+build/
+*.egg-info/
+# 本地放置的 Rerank 等模型文件（体积大，不入库）
+models/
+.DS_Store
+Thumbs.db

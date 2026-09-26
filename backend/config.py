@@ -29,7 +29,7 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 # 生成温度：控制回答的随机性与发散程度。
 # 0.1=极保守(幻觉低但归纳弱)；0.3=轻度放宽(允许合理归纳，幻觉可控)；
-# 0.5=平衡；0.7=较强发散。本项目取 0.3 以提升任务完成率，接受<5%低幻觉。
+# 0.5=平衡；0.7=较强发散。项目默认 0.3，实际效果仍需通过证据评测确认。
 DEEPSEEK_TEMPERATURE = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.3"))
 
 
@@ -64,6 +64,33 @@ TOP_K = int(os.getenv("TOP_K", "8"))
 # bge-small-zh 的相似度分布整体低于 all-MiniLM-L6-v2，阈值由 0.25 降至 0.15，
 # 避免正确片段被误过滤（降低误拒率、提升任务完成率）。
 RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.15"))
+
+# ---------------- Rerank 重排配置（两阶段检索第二阶段）----------------
+# 粗排候选池大小：先按向量余弦召回 20 个候选，保证召回上限；
+# 再交给 Cross-Encoder 逐对精排，取 TOP_K 个喂给大模型。
+RETRIEVE_CANDIDATE_K = int(os.getenv("RETRIEVE_CANDIDATE_K", "20"))
+# 是否启用 Cross-Encoder 重排；加载失败时自动降级为粗排原顺序，不影响问答
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").lower() == "true"
+# 重排模型：默认为 HF 模型 ID（bge-reranker-base，中文优化的 Cross-Encoder）。
+# 更强可选 BAAI/bge-reranker-large / BAAI/bge-reranker-v2-m3（均更慢、更吃内存）。
+# 若配置值对应的项目内本地目录存在（如 models/bge-reranker-base，
+# 可在网络差时手动放置模型文件），则优先使用本地路径，完全跳过下载。
+_rerank_model_raw = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
+_local_rerank_dir = BASE_DIR / _rerank_model_raw
+if _local_rerank_dir.exists():
+    RERANK_MODEL = str(_local_rerank_dir)
+else:
+    RERANK_MODEL = _rerank_model_raw
+# 重排批量大小：候选(问题,片段)对的推理 batch，CPU 建议 8
+RERANK_BATCH_SIZE = int(os.getenv("RERANK_BATCH_SIZE", "8"))
+# 重排分数下限。bge-reranker 输出为未归一化 logit（可正可负，不局限 0-1），
+# 默认 -100 即不过滤；如发现重排后仍混入弱相关片段，可尝试设为 0
+RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "-100"))
+
+# ---------------- 会话记忆配置（多轮对话）----------------
+# 保留的历史轮数（1 轮 = 用户问 + 助手答）。
+# 超出后只携带最近 N 轮参与问题改写与生成，控制 token 消耗与噪声。
+MEMORY_MAX_TURNS = int(os.getenv("MEMORY_MAX_TURNS", "3"))
 
 # ---------------- Embedding 模型配置 ----------------
 # 使用中文 Embedding 模型 bge-small-zh-v1.5（约 100MB）。

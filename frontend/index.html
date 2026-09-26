@@ -53,8 +53,13 @@
     <!-- 主区域：问答对话 -->
     <main class="chat-area">
         <header class="chat-header">
-            <h2>知识库问答</h2>
-            <p>Agent 先检索文档片段，再基于原文回答 · 无相关资料时直接拒答</p>
+            <div class="chat-header-row">
+                <div>
+                    <h2>知识库问答</h2>
+                    <p>粗排 Top-20 + Cross-Encoder 重排 · 多轮对话记忆 · 无相关资料时直接拒答</p>
+                </div>
+                <button id="newChatBtn" class="new-chat-btn" title="清空上下文，开始新对话">🆕 新对话</button>
+            </div>
         </header>
 
         <!-- 消息列表 -->
@@ -63,9 +68,10 @@
                 <h3>👋 欢迎使用 RAG 知识库 AI Agent</h3>
                 <ul>
                     <li>1. 在左侧上传 PDF / TXT / Markdown 文档，系统自动切片并向量化入库</li>
-                    <li>2. 在下方输入问题，Agent 会先检索相关文档片段</li>
+                    <li>2. 在下方输入问题，系统先粗排 20 个候选，再经 Cross-Encoder 重排精筛</li>
                     <li>3. 回答严格基于检索到的原文，并标注引用来源</li>
-                    <li>4. 知识库中没有相关信息时，将回复「文档内无相关资料」</li>
+                    <li>4. 支持多轮追问，可结合上文理解指代；点「新对话」清空上下文</li>
+                    <li>5. 知识库中没有相关信息时，将回复「文档内无相关资料」</li>
                 </ul>
             </div>
         </div>

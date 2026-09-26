@@ -1,11 +1,11 @@
 # RAG 知识库 AI Agent
 
-一个基于 **DeepSeek 大模型 + 本地轻量向量库** 的网页版 RAG（检索增强生成）知识库问答系统。
-上传文档后自动切片、向量化入库；提问时 Agent 先调用内置检索 Skill 获取相关文档片段，再交由 DeepSeek 严格基于原文生成带引用来源的回答。
+一个基于 **DeepSeek 大模型 + 双阶段检索 + 本地轻量向量库** 的网页版 RAG（检索增强生成）知识库问答系统。
+上传文档后自动切片、向量化入库；提问时 Agent 先用 bge-small-zh 粗排召回 Top-20 候选，再经 bge-reranker Cross-Encoder 精排取 Top-8，最后交由 DeepSeek 基于原文生成带引用来源的回答；支持以 session_id 关联的多轮对话记忆。
 
 ## 📋 产品需求文档（PRD）
 
-完整产品需求文档已整理至飞书云文档，涵盖产品背景、用户故事、功能需求、非功能需求、技术架构、评测体系与迭代规划，并附系统主界面原型图：
+完整产品需求文档见本地 [PRD.md](PRD.md)，涵盖产品背景、用户故事、功能需求、非功能需求、技术架构、评测体系与迭代规划。飞书文档链接：
 
 👉 [RAG 知识库 AI Agent PRD（飞书文档）](https://hcna5lsumjxf.feishu.cn/docx/RXWgdOy5xofh8NxDBUqcGo2XnrB)
 
@@ -14,8 +14,10 @@
 - 📄 **多格式文档支持**：PDF / TXT / Markdown 上传，自动解析入库；扫描件 PDF 可选启用 OCR 降级识别
 - 🔪 **智能切片**：按段落/句子自然边界切分，切片长度 500 字符、重叠 100 字符（可配置）
 - 🧮 **本地向量化**：`BAAI/bge-small-zh-v1.5` 中文 Embedding 模型，无需外部向量数据库（JSON 持久化 + NumPy 余弦检索）
-- 🤖 **Agent 工作流**：提问 → 调用文档检索 Skill → 取 Top-K 相关片段 → DeepSeek 生成回答
-- 🛡️ **防幻觉机制**：回答仅基于检索到的原文并标注 `[n]` 引用来源；知识库无相关信息时直接回复「文档内无相关资料」，不经过大模型，从源头杜绝编造
+- 🎯 **双阶段检索**：bge-small-zh 双塔粗排 Top-20 → bge-reranker-base Cross-Encoder 逐对精排取 Top-8，显著提升片段级精确率
+- 💬 **多轮对话记忆**：基于 session_id 关联历史，通过问题改写 Prompt 把追问补全为可独立检索的完整问题，解决指代与省略
+- 🤖 **Agent 工作流**：提问 → 问题改写 → 粗排召回 → Cross-Encoder 重排 → DeepSeek 基于原文生成带 `[n]` 引用的回答
+- 🛡️ **证据约束回答**：检索阈值过滤、Cross-Encoder 重排、引用溯源和无结果拒答共同降低无依据回答风险；实际效果以评测结果为准
 - 🎨 **简洁 Web UI**：左侧知识库管理（上传/删除/统计），右侧对话问答，引用来源可展开查看
 
 ## 📁 项目结构
@@ -24,9 +26,11 @@
 rag-knowledge-agent/
 ├── backend/
 │   ├── main.py             # FastAPI 主应用（接口 + 静态页面托管）
-│   ├── agent.py            # Agent 核心：检索 Skill + DeepSeek 调用 + 防幻觉逻辑
+│   ├── agent.py            # Agent 编排：问题改写、检索、重排和回答
+│   ├── reranker.py         # Cross-Encoder 重排
+│   ├── memory.py           # 基于 session_id 的多轮对话记忆
 │   ├── config.py           # 全局配置（读取 .env）
-│   ├── document_parser.py  # PDF/TXT/Markdown 解析（含扫描件 OCR 降级）
+│   ├── document_parser.py  # PDF/TXT/Markdown 解析（含可选 OCR）
 │   ├── text_splitter.py    # 文本切片
 │   ├── embedding.py        # 向量化（sentence-transformers）
 │   └── vector_store.py     # 轻量向量库（JSON 持久化 + 余弦检索）
@@ -34,11 +38,13 @@ rag-knowledge-agent/
 │   ├── index.html          # 页面结构
 │   ├── style.css           # 样式
 │   └── app.js              # 交互逻辑
-├── test_docs/              # 评测用测试文档（Dify / Coze / 幻觉 三篇）
+├── test_docs/              # 示例与测试文档
+├── benchmarks/             # 评测准备、运行、评分脚本及说明
 ├── data/                   # 向量库持久化数据（运行后自动生成）
 ├── uploads/                # 上传的原始文档（运行后自动生成）
 ├── requirements.txt        # Python 依赖
 ├── .env.example            # 环境变量模板（API Key 填这里）
+├── PRD.md                  # 产品需求文档
 └── README.md
 ```
 
@@ -126,17 +132,20 @@ http://127.0.0.1:8000
 | POST | `/api/documents/upload` | 上传文档（multipart/form-data，字段名 `file`） |
 | GET | `/api/documents` | 获取知识库统计与文档列表 |
 | DELETE | `/api/documents/{doc_id}` | 删除文档及其全部切片 |
-| POST | `/api/chat` | 知识库问答，请求体 `{"question": "你的问题"}` |
+| POST | `/api/chat` | 知识库问答，请求体 `{"question": "你的问题", "session_id": "可选"}`；多轮对话通过 `session_id` 关联，首轮不传则后端新建并在响应中返回 |
+| POST | `/api/session/reset` | 清除指定会话的记忆，请求体 `{"session_id": "会话ID"}` |
 
 启动后也可访问自动生成的交互式接口文档：`http://127.0.0.1:8000/docs`
 
 ## ⚙️ 核心实现说明
 
 - **切片策略**：优先按 `。！？.!?\n` 等自然边界切分，超长单元硬切；相邻切片保留 100 字符重叠保证上下文连贯。切片长度 500 字符匹配 bge-small-zh 的 512 token 窗口，避免尾部截断导致召回丢失
-- **检索方式**：向量归一化后用点积计算余弦相似度，取 Top-K（默认 8）并过滤低于 `RELEVANCE_THRESHOLD`（默认 0.15）的片段
-- **Embedding 模型**：默认 `BAAI/bge-small-zh-v1.5` 中文模型，对中文语义匹配效果优于英文模型；如需切回轻量英文模型，可在 `.env` 中将 `EMBEDDING_MODEL` 改为 `sentence-transformers/all-MiniLM-L6-v2`（注意：切换模型需删除 `data/vector_store.json` 重建向量库，两种模型向量维度不同）
-- **防幻觉**：检索结果为空时直接返回固定拒答文案，不调用大模型；系统提示词强约束模型只依据参考资料作答
-- **生成温度**：默认 0.3，允许模型对参考资料进行轻度归纳与同义改写，在任务完成率与幻觉率之间取平衡
+- **双阶段检索**：第一阶段用 bge-small-zh 双塔粗排，按余弦相似度召回 Top-20 候选；第二阶段用 bge-reranker-base Cross-Encoder 对 (问题, 片段) 逐对精排，取 Top-8 喂给大模型。粗排保证召回上限，重排提升片段级精确率
+- **检索阈值**：余弦相似度低于 `RELEVANCE_THRESHOLD`（默认 0.15）的片段直接丢弃；bge-small-zh 相似度分布整体偏低，阈值由 0.25 降至 0.15 避免正确片段被误过滤
+- **多轮对话**：通过 `session_id` 关联历史（默认保留最近 3 轮），提问前先用问题改写 Prompt 把追问补全为脱离上下文也能独立理解的完整问题，再进入检索流程
+- **Embedding 模型**：默认 `BAAI/bge-small-zh-v1.5` 中文模型，对中文语义匹配效果优于英文模型（实测 all-MiniLM-L6-v2 中文召回率仅 51.85%）；如需切回轻量英文模型，可在 `.env` 中将 `EMBEDDING_MODEL` 改为 `sentence-transformers/all-MiniLM-L6-v2`（注意：切换模型需删除 `data/vector_store.json` 重建向量库，两种模型向量维度不同）
+- **防幻觉机制**：检索阈值过滤、Cross-Encoder 重排、系统提示词和引用溯源帮助回答保持在证据范围内；检索结果为空时返回固定拒答文案。它们不能保证没有幻觉，效果以评测为准
+- **生成温度**：本轮 200 题评测使用 `DEEPSEEK_TEMPERATURE=0.3`。实际运行值由 `.env` 中的配置决定；低温度不能保证回答无幻觉
 
 ## 🔍 OCR 扫描件支持（可选）
 
@@ -168,8 +177,16 @@ OCR 相关参数（语言、分辨率、开关）可在 `.env` 中调整，详�
 
 ## 📊 评测数据
 
-项目使用 `test_docs/` 下的三篇文档（Dify 工作流、Coze 知识库、LLM 幻觉）构建了 40 道测试题（单跳事实 / 多文档对比 / 库内无答案 / 越界提问），并对召回率、检索精确率、幻觉率、任务完成率进行了完整评测。
+[飞书评测表（200 题）](https://hcna5lsumjxf.feishu.cn/base/WptQb7Qb4a8wP7scKrlcrqkznBf)记录了项目 API 在 `temperature=0.3` 下的 200 题运行与逐题判定。题目取自 CRUD-RAG 中文新闻问答数据的固定子集，按单文档、双文档、三文档和近邻无答案四类组织；题目、参考答案与入库原文分开保存。
 
-评测明细与指标汇总见飞书多维表格：**[RAG知识库Agent评测集（40题）](https://hcna5lsumjxf.feishu.cn/base/WptQb7Qb4a8wP7scKrlcrqkznBf)**
+| 指标 | 结果 | 口径 |
+| --- | ---: | --- |
+| 有效评审题数 | 200/200 | 200 题均有评分与判定结果 |
+| 总体回答正确率 | **93.50%（187/200）** | 包含无答案题的拒答表现 |
+| 幻觉率 | **9.00%（18/200）** | 回答中至少有一项事实缺少检索证据支持的题数 / 总题数 |
+| 来源文档召回@8 | **98.06%（353/360）** | 只统计 180 道可回答题；20 道无答案题不适用 |
+| 全部来源命中题率@8 | **96.67%（174/180）** | 可回答题中所有预期来源均进入最终 8 个片段的比例 |
 
-> 表格包含每题的 Agent 最终回答、检索到的原文出处（文档 + 片段全文 + 相似度）、原文真值及四项判定标签，可直接用于复盘检索质量与防幻觉效果。
+题型分布为单文档 60 题、双文档 60 题、三文档 60 题、近邻无答案 20 题。召回判定为“是”174 题、“部分”6 题、“否”0 题；20 道无答案题没有正例来源文档，因此不计入来源召回分母。当前幻觉率高于产品目标 5%，该目标尚未达成。
+
+这组分数来自固定子集，不代表 CRUD-RAG 完整基准成绩。运行、逐题审计和复现方法见 [中文 RAG 评测说明](benchmarks/README.md)。
